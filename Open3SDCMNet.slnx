@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="benchmarks/Open3SDCMNet.Benchmarks.csproj" />
+  <Project Path="Open3SDCMNet.csproj" />
+  <Project Path="tests/Open3SDCMNet.Tests.csproj" />
+</Solution>
