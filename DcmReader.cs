@@ -110,6 +110,7 @@ public static class DcmReader
         var triangles = FacetDecoder.Decode(DecodeBytes(facets), vertexCount, Count(facets, "facet_count"));
         Rgb? color = uint.TryParse((string?)facets.Attribute("color"), out uint rgb)
             ? new Rgb((byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb) : null;
+        var vertexColors = ReadVertexColors(root, vertexCount, warnings);
 
         var textureData = root.Element("TextureData2");
         var images = (textureData ?? root).Element("TextureImages")?.Elements("TextureImage")
@@ -135,7 +136,36 @@ public static class DcmReader
             sets.Add(new(Attribute(node, "TextureCoordId"), Attribute(node, TextureIdAttribute), key,
                 length, Array.AsReadOnly(corners)));
         }
-        return new DcmMesh(schema, vertices, triangles, color, [.. sets], images, warnings);
+        return new DcmMesh(schema, vertices, triangles, color, vertexColors, [.. sets], images, warnings);
+    }
+
+    private static Rgb[] ReadVertexColors(XElement root, int vertexCount, List<string> warnings)
+    {
+        const int bytesPerColor = 4;
+        int expectedBytes = checked(vertexCount * bytesPerColor);
+        foreach (var node in root.Element("VertexColorSets")?.Elements("VertexColorSet") ?? [])
+        {
+            byte[] bytes;
+            try { bytes = DecodeBytes(node); }
+            catch (InvalidDataException ex)
+            {
+                warnings.Add(ex.Message);
+                continue;
+            }
+
+            int declaredBytes = Size(node, EncodedByteCountAttribute);
+            if (bytes.Length != expectedBytes || (declaredBytes > 0 && declaredBytes != expectedBytes))
+            {
+                warnings.Add("VertexColorSet length does not match the vertex count for packed BGRA colors.");
+                continue;
+            }
+
+            var colors = new Rgb[vertexCount];
+            for (int i = 0, offset = 0; i < colors.Length; i++, offset += bytesPerColor)
+                colors[i] = new Rgb(bytes[offset + 2], bytes[offset + 1], bytes[offset]);
+            return colors;
+        }
+        return [];
     }
 
     private static TextureImage ReadImage(XElement node) => new(

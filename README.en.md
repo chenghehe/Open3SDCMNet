@@ -45,8 +45,10 @@ await MeshWriter.WriteAsync(mesh, "out/scan.stl");
 | Extension | Output |
 | --- | --- |
 | `.stl`, `.stlb` | Binary STL with triangles and face normals. |
-| `.ply` | ASCII PLY with vertices and triangles. When a base color is present, each vertex gets the same RGB values. |
+| `.ply` | ASCII PLY with vertices, area-weighted vertex normals, and triangles. Colors come from texture and UV sampling, native vertex colors, or the base color, in that order. |
 | `.obj` | Wavefront OBJ. The exporter writes `.mtl` and `_texture0.jpg` companion files in the same directory when needed. It flips the V component of exported UV coordinates. |
+
+PLY export swaps the texture's red and blue channels by default for 3Shape scans that use this order. For textures already in RGB order, use an export overload with `swapTextureRedBlue: false`. The async overloads also take a `cancellationToken`.
 
 ## API reference
 
@@ -62,7 +64,7 @@ Reading starts at the stream's current position, and the caller is responsible f
 ### Mesh data and diagnostics
 
 - `Schema` identifies the input file's HPS schema. `Vertices` stores single-precision 3D coordinates, and `Triangles` stores zero-based vertex indices.
-- `BaseColor` is an optional color for the entire mesh. `CoordinateSets` and `Images` contain UV coordinates and image data. `GetTextureBinding()` returns the coordinate set and image used for export. UV coordinates are stored per triangle corner, and `null` marks a corner with no UV coordinate.
+- `BaseColor` is an optional color for the entire mesh. `VertexColors` contains native RGB colors read from the packed BGRA `VertexColorSet`, or is empty when unavailable. `CoordinateSets` and `Images` contain UV coordinates and image data. `GetTextureBinding()` returns the coordinate set and image used for export. UV coordinates are stored per triangle corner, and `null` marks a corner with no UV coordinate.
 - Invalid HPS XML or geometry data raises `InvalidDataException`. Check `Warnings` for diagnostics such as CE vertex checksum mismatches and failures to decode optional UV data.
 
 ## Development and verification

@@ -45,8 +45,10 @@ await MeshWriter.WriteAsync(mesh, "out/scan.stl");
 | 扩展名 | 输出内容 |
 | --- | --- |
 | `.stl`、`.stlb` | 二进制 STL，包含三角面和面法线。 |
-| `.ply` | ASCII PLY，包含顶点和三角面。有底色时，每个顶点写入同一组 RGB 值。 |
+| `.ply` | ASCII PLY，包含顶点、按相邻三角面面积加权计算的顶点法线和三角面。颜色优先从纹理与 UV 采样，其次使用原生顶点色，最后用底色。 |
 | `.obj` | Wavefront OBJ，按需在同一目录生成 `.mtl` 和 `_texture0.jpg`。导出 UV 时翻转 V 坐标。 |
+
+PLY 导出默认交换纹理采样的红、蓝通道，适配采用该通道顺序的 3Shape 扫描。当贴图已经是 RGB 顺序时，可用带 `swapTextureRedBlue: false` 的导出重载。异步重载同时接收 `cancellationToken`。
 
 ## API 参考
 
@@ -62,7 +64,7 @@ await MeshWriter.WriteAsync(mesh, "out/scan.stl");
 ### 网格数据与诊断
 
 - `Schema` 记录输入文件的 HPS 格式。`Vertices` 保存单精度三维坐标，`Triangles` 保存从零开始的顶点索引。
-- `BaseColor` 是可选的整网格底色。`CoordinateSets` 和 `Images` 保存 UV 与图像数据，`GetTextureBinding()` 返回导出所用的坐标集和图像。UV 按三角面的角点排列，`null` 表示该角点缺少 UV。
+- `BaseColor` 是可选的整网格底色。`VertexColors` 保存从 BGRA `VertexColorSet` 读取的原生 RGB 顶点色，缺失时为空。`CoordinateSets` 和 `Images` 保存 UV 与图像数据，`GetTextureBinding()` 返回导出所用的坐标集和图像。UV 按三角面的角点排列，`null` 表示该角点缺少 UV。
 - 无效的 HPS XML 或几何数据会抛出 `InvalidDataException`。CE 顶点校验和不匹配、可选 UV 数据解码失败等诊断可从 `Warnings` 读取。
 
 ## 开发与验证

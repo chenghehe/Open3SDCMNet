@@ -10,7 +10,7 @@ namespace Open3SDCMNet;
 internal sealed class FacetDecoder(byte[] bytes, int vertexCount, Triangle[] faces, int shortWidth)
 {
     private readonly record struct Edge(int Start, int End);
-    private readonly List<Edge> edges = [];
+    private readonly EdgeFrontier edges = new();
     private int current;
     private int offset;
     private int nextVertex;
@@ -143,6 +143,80 @@ internal sealed class FacetDecoder(byte[] bytes, int vertexCount, Triangle[] fac
             edges[previous] = p with { End = e.End };
             edges.RemoveAt(current);
             current = edges.Count == 0 ? 0 : current % edges.Count;
+        }
+    }
+
+    // Keep unused slots near the last edit, where the next frontier edit usually lands.
+    // The ranges on either side of the gap still form the original logical edge order.
+    private sealed class EdgeFrontier
+    {
+        private const int InitialCapacity = 4;
+        private Edge[] items = new Edge[InitialCapacity];
+        private int gapStart;
+        private int gapEnd = InitialCapacity;
+
+        internal int Count => items.Length - (gapEnd - gapStart);
+
+        internal Edge this[int index]
+        {
+            get => items[Position(index)];
+            set => items[Position(index)] = value;
+        }
+
+        internal void Clear()
+        {
+            gapStart = 0;
+            gapEnd = items.Length;
+        }
+
+        internal void Add(Edge edge) => Insert(Count, edge);
+
+        internal void Insert(int index, Edge edge)
+        {
+            if (gapStart == gapEnd)
+                Grow();
+            MoveGap(index);
+            items[gapStart++] = edge;
+        }
+
+        internal void RemoveAt(int index)
+        {
+            MoveGap(index);
+            gapEnd++;
+        }
+
+        private int Position(int index) => index < gapStart ? index : index + (gapEnd - gapStart);
+
+        private void Grow()
+        {
+            int capacity = (int)Math.Min(2L * items.Length, Array.MaxLength);
+            if (capacity == items.Length)
+                throw new OutOfMemoryException();
+
+            var larger = new Edge[capacity];
+            Array.Copy(items, larger, gapStart);
+            int tail = items.Length - gapEnd;
+            Array.Copy(items, gapEnd, larger, larger.Length - tail, tail);
+            items = larger;
+            gapEnd = larger.Length - tail;
+        }
+
+        private void MoveGap(int index)
+        {
+            if (index < gapStart)
+            {
+                int count = gapStart - index;
+                Array.Copy(items, index, items, gapEnd - count, count);
+                gapStart = index;
+                gapEnd -= count;
+            }
+            else if (index > gapStart)
+            {
+                int count = index - gapStart;
+                Array.Copy(items, gapEnd, items, gapStart, count);
+                gapStart = index;
+                gapEnd += count;
+            }
         }
     }
 }

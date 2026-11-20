@@ -21,17 +21,20 @@ public sealed class DcmMesh
     public IReadOnlyList<Vector3> Vertices { get; }
     public IReadOnlyList<Triangle> Triangles { get; }
     public Rgb? BaseColor { get; }
+    /// <summary>Native RGB values in vertex order, or an empty list if unavailable.</summary>
+    public IReadOnlyList<Rgb> VertexColors { get; }
     public IReadOnlyList<TextureCoordinates> CoordinateSets { get; }
     public IReadOnlyList<TextureImage> Images { get; }
     public IReadOnlyList<string> Warnings { get; }
 
-    internal DcmMesh(string schema, Vector3[] vertices, Triangle[] triangles, Rgb? color,
+    internal DcmMesh(string schema, Vector3[] vertices, Triangle[] triangles, Rgb? color, Rgb[] vertexColors,
         TextureCoordinates[] sets, TextureImage[] images, List<string> warnings)
     {
         Schema = schema;
         Vertices = Array.AsReadOnly(vertices);
         Triangles = Array.AsReadOnly(triangles);
         BaseColor = color;
+        VertexColors = Array.AsReadOnly(vertexColors);
         CoordinateSets = Array.AsReadOnly(sets);
         Images = Array.AsReadOnly(images);
         Warnings = warnings.AsReadOnly();

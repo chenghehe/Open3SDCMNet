@@ -24,7 +24,10 @@ public static class MeshWriter
     private static readonly object ObjPublicationLock = new();
 
     /// <summary>Exports by file extension (.stl, .stlb, .ply or .obj). OBJ companions are written alongside the mesh.</summary>
-    public static void Write(DcmMesh mesh, string path)
+    public static void Write(DcmMesh mesh, string path) => Write(mesh, path, swapTextureRedBlue: true);
+
+    /// <summary>Exports by file extension and controls the red/blue order for PLY texture sampling.</summary>
+    public static void Write(DcmMesh mesh, string path, bool swapTextureRedBlue)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         using var staging = new StagedExport(path);
@@ -33,7 +36,7 @@ public static class MeshWriter
             switch (staging.Extension)
             {
                 case ObjExtension: WriteObj(mesh, output, staging.Target); break;
-                case PlyExtension: WritePly(mesh, output); break;
+                case PlyExtension: WritePly(mesh, output, swapTextureRedBlue); break;
                 default: WriteStl(mesh, output); break;
             }
         }
@@ -201,33 +204,94 @@ public static class MeshWriter
         return length;
     }
 
-    private static int FormatPlyVertex(Span<char> buffer, IFormatProvider culture, Vector3 vertex, string tint) =>
-        FormatPlyRow(buffer, culture, $"{vertex.X:R} {vertex.Y:R} {vertex.Z:R}{tint}");
+    private static int FormatPlyVertex(Span<char> buffer, IFormatProvider culture, Vector3 vertex,
+        (double X, double Y, double Z) normalSum, Rgb? color)
+    {
+        var (x, y, z) = normalSum;
+        double length = Math.Sqrt(x * x + y * y + z * z);
+        var normal = length > 0
+            ? new Vector3((float)(x / length), (float)(y / length), (float)(z / length))
+            : Vector3.Zero;
+        int lengthWritten = FormatPlyRow(buffer, culture,
+            $"{vertex.X:R} {vertex.Y:R} {vertex.Z:R} {normal.X:R} {normal.Y:R} {normal.Z:R}");
+        if (color is { } rgb)
+            lengthWritten += FormatPlyRow(buffer[lengthWritten..], culture, $" {rgb.Red} {rgb.Green} {rgb.Blue}");
+        return lengthWritten;
+    }
 
     private static int FormatPlyFace(Span<char> buffer, IFormatProvider culture, Triangle face) =>
         FormatPlyRow(buffer, culture, $"3 {face.A} {face.B} {face.C}");
 
-    /// <summary>Writes an ASCII PLY and leaves the destination stream open.</summary>
-    public static void WritePly(DcmMesh mesh, Stream destination)
+    /// <summary>Writes an ASCII PLY with vertex normals and available colors, leaving the stream open.</summary>
+    public static void WritePly(DcmMesh mesh, Stream destination) =>
+        WritePly(mesh, destination, swapTextureRedBlue: true);
+
+    /// <summary>Writes an ASCII PLY and controls the red/blue order for texture sampling.</summary>
+    public static void WritePly(DcmMesh mesh, Stream destination, bool swapTextureRedBlue)
     {
         ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(destination);
+        var normalSums = AccumulateVertexNormals(mesh);
+        var colors = PlyColorBaker.GetVertexColors(mesh, swapTextureRedBlue);
         using var writer = Text(destination);
-        var (header, tint) = GetPlyHeader(mesh);
-        writer.Write(header);
-        // Reuse one buffer for round-trip float coordinates, RGB, and face indices.
+        writer.Write(GetPlyHeader(mesh, colors.Count > 0 || mesh.BaseColor.HasValue));
         Span<char> row = stackalloc char[PlyRowCapacity];
         var culture = CultureInfo.InvariantCulture;
-        foreach (var v in mesh.Vertices)
-            writer.WriteLine(row[..FormatPlyVertex(row, culture, v, tint)]);
+        for (int i = 0; i < normalSums.Length; i++)
+        {
+            Rgb? color = colors.Count > 0 ? colors[i] : mesh.BaseColor;
+            writer.WriteLine(row[..FormatPlyVertex(row, culture, mesh.Vertices[i], normalSums[i], color)]);
+        }
         foreach (var f in mesh.Triangles)
             writer.WriteLine(row[..FormatPlyFace(row, culture, f)]);
     }
 
-    private static (string Header, string Tint) GetPlyHeader(DcmMesh mesh)
+    private static (double X, double Y, double Z)[] AccumulateVertexNormals(
+        DcmMesh mesh, CancellationToken cancellationToken = default)
     {
-        string colorProperties = mesh.BaseColor.HasValue ? "property uchar red\nproperty uchar green\nproperty uchar blue\n" : "";
-        string tint = mesh.BaseColor is { } color ? Invariant($" {color.Red} {color.Green} {color.Blue}") : "";
-        return (Invariant($"ply\nformat ascii 1.0\nelement vertex {mesh.Vertices.Count}\nproperty float x\nproperty float y\nproperty float z\n{colorProperties}element face {mesh.Triangles.Count}\nproperty list uchar int vertex_indices\nend_header\n"), tint);
+        var vertices = mesh.Vertices;
+        var triangles = mesh.Triangles;
+        var sums = new (double X, double Y, double Z)[vertices.Count];
+        for (int i = 0; i < triangles.Count; i++)
+        {
+            if (i % 4096 == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+
+            var face = triangles[i];
+            var a = vertices[face.A];
+            var b = vertices[face.B];
+            var c = vertices[face.C];
+
+            // Use double throughout the cross product and sum to cover the float coordinate range.
+            double abX = (double)b.X - a.X, abY = (double)b.Y - a.Y, abZ = (double)b.Z - a.Z;
+            double acX = (double)c.X - a.X, acY = (double)c.Y - a.Y, acZ = (double)c.Z - a.Z;
+            double x = abY * acZ - abZ * acY;
+            double y = abZ * acX - abX * acZ;
+            double z = abX * acY - abY * acX;
+            if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
+                continue;
+
+            // The cross product's magnitude is twice the triangle's area.
+            Add(ref sums[face.A], x, y, z);
+            Add(ref sums[face.B], x, y, z);
+            Add(ref sums[face.C], x, y, z);
+        }
+        return sums;
+
+        static void Add(ref (double X, double Y, double Z) sum, double x, double y, double z)
+        {
+            sum.X += x;
+            sum.Y += y;
+            sum.Z += z;
+        }
+    }
+
+    private static string GetPlyHeader(DcmMesh mesh, bool hasColor)
+    {
+        string colorProperties = hasColor ? "property uchar red\nproperty uchar green\nproperty uchar blue\n" : "";
+        const string vertexProperties = "property float x\nproperty float y\nproperty float z\n"
+            + "property float nx\nproperty float ny\nproperty float nz\n";
+        return Invariant($"ply\nformat ascii 1.0\nelement vertex {mesh.Vertices.Count}\n{vertexProperties}{colorProperties}element face {mesh.Triangles.Count}\nproperty list uchar int vertex_indices\nend_header\n");
     }
 
     private static void WriteObj(DcmMesh mesh, Stream output, string path)
@@ -289,7 +353,11 @@ public static class MeshWriter
     }
 
     /// <summary>Exports with asynchronous writes and publishes the completed files.</summary>
-    public static async Task WriteAsync(DcmMesh mesh, string path, CancellationToken cancellationToken = default)
+    public static Task WriteAsync(DcmMesh mesh, string path, CancellationToken cancellationToken = default) =>
+        WriteAsync(mesh, path, cancellationToken, swapTextureRedBlue: true);
+
+    /// <summary>Exports asynchronously and controls the red/blue order for PLY texture sampling.</summary>
+    public static async Task WriteAsync(DcmMesh mesh, string path, CancellationToken cancellationToken, bool swapTextureRedBlue)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         cancellationToken.ThrowIfCancellationRequested();
@@ -303,7 +371,7 @@ public static class MeshWriter
                     await WriteObjAsync(mesh, output, staging.Target, cancellationToken).ConfigureAwait(false);
                     break;
                 case PlyExtension:
-                    await WritePlyAsync(mesh, output, cancellationToken).ConfigureAwait(false);
+                    await WritePlyAsync(mesh, output, cancellationToken, swapTextureRedBlue).ConfigureAwait(false);
                     break;
                 default:
                     await WriteStlAsync(mesh, output, cancellationToken).ConfigureAwait(false);
@@ -341,14 +409,21 @@ public static class MeshWriter
         finally { ArrayPool<byte>.Shared.Return(buffer, clearArray: true); }
     }
 
-    /// <summary>Writes an ASCII PLY asynchronously and leaves the destination stream open.</summary>
-    public static async Task WritePlyAsync(DcmMesh mesh, Stream destination, CancellationToken cancellationToken = default)
+    /// <summary>Writes an ASCII PLY asynchronously with vertex normals and available colors, leaving the stream open.</summary>
+    public static Task WritePlyAsync(DcmMesh mesh, Stream destination, CancellationToken cancellationToken = default) =>
+        WritePlyAsync(mesh, destination, cancellationToken, swapTextureRedBlue: true);
+
+    /// <summary>Writes an ASCII PLY asynchronously and controls the red/blue order for texture sampling.</summary>
+    public static async Task WritePlyAsync(DcmMesh mesh, Stream destination, CancellationToken cancellationToken, bool swapTextureRedBlue)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         ArgumentNullException.ThrowIfNull(destination);
         cancellationToken.ThrowIfCancellationRequested();
+        var normalSums = AccumulateVertexNormals(mesh, cancellationToken);
+        var colors = PlyColorBaker.GetVertexColors(mesh, swapTextureRedBlue, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         await using var writer = Text(destination);
-        var (header, tint) = GetPlyHeader(mesh);
+        string header = GetPlyHeader(mesh, colors.Count > 0 || mesh.BaseColor.HasValue);
         await writer.WriteAsync(header.AsMemory(), cancellationToken).ConfigureAwait(false);
 
         char[] buffer = ArrayPool<char>.Shared.Rent(TextChunkSize);
@@ -358,7 +433,7 @@ public static class MeshWriter
             while (vertex < mesh.Vertices.Count || face < mesh.Triangles.Count)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                int length = FillPlyChunk(mesh, tint, ref vertex, ref face, buffer.AsSpan(0, TextChunkSize));
+                int length = FillPlyChunk(mesh, normalSums, colors, ref vertex, ref face, buffer.AsSpan(0, TextChunkSize));
                 await writer.WriteAsync(buffer.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
             }
             await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -366,16 +441,18 @@ public static class MeshWriter
         finally { ArrayPool<char>.Shared.Return(buffer, clearArray: true); }
     }
 
-    private static int FillPlyChunk(DcmMesh mesh, string tint, ref int vertex, ref int face, Span<char> chunk)
+    private static int FillPlyChunk(DcmMesh mesh, ReadOnlySpan<(double X, double Y, double Z)> normalSums,
+        IReadOnlyList<Rgb> colors, ref int vertex, ref int face, Span<char> chunk)
     {
         // Invariant round-trip float32 values, RGB, and indices fit in 127 chars plus LF.
         var culture = CultureInfo.InvariantCulture;
         int used = 0;
         while (vertex < mesh.Vertices.Count && chunk.Length - used >= PlyRowCapacity)
         {
-            var v = mesh.Vertices[vertex++];
-            used += FormatPlyVertex(chunk.Slice(used, PlyRowCapacity - 1), culture, v, tint);
+            Rgb? color = colors.Count > 0 ? colors[vertex] : mesh.BaseColor;
+            used += FormatPlyVertex(chunk.Slice(used, PlyRowCapacity - 1), culture, mesh.Vertices[vertex], normalSums[vertex], color);
             chunk[used++] = '\n';
+            vertex++;
         }
         while (vertex == mesh.Vertices.Count && face < mesh.Triangles.Count && chunk.Length - used >= PlyRowCapacity)
         {
